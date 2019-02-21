@@ -1,67 +1,99 @@
 #include "PID.h"
 #include <numeric>
 #include <iostream>
-
+#include <iomanip>
+#include <cmath>
 PID::PID()  {}
 PID::~PID() {}
 
-const int TWIDDLE_OVER_STEPS = 5;
+const int TWIDDLE_NUMBER_STEPS = 250;
 const double TWIDDLE_TOLERANCE = 0.00001;
+const int INTEGRAL_ERROR_COUNT = 200;
 
-void PID::Init(double Kp_, double Ki_, double Kd_)
+void PID::Init(double Kp_, double Kd_, double Ki_)
 {
     //
-    // Initialize PID coefficients (and errors, if needed)
+    // Initialize PID coefficients and errors
     //
+    p       = {Kp_, Kd_, Ki_};
+    dp      = {1.591282316e-06, 5.35810784e-06, 1.811351647e-08};
     p_error = 0.0;
     i_error = 0.0;
     d_error = 0.0;
 
-    p  = {Kp_, Kd_, Ki_};
-    //dp = {0.00682484, .1, .001};
-    p = {0.0, 0.0, 0.0};
-    dp = {1.0, 1.0, 1.0};
+    //
+    // If twiddling we will gather errors for CTEs
+    // over this many steps.
+    //
+    twiddle_steps = 2 * TWIDDLE_NUMBER_STEPS;
 
-    // p  = {0.474599, 0.00948717, 0.000500353};
-    // dp = {8.91526e-14, 1.62096e-15, 1.98117e-16};
-
-
-    // p = {0.363958, 0.0061051, 0.000454494};
-    // dp = {0.00969212, 0.00017622, 2.1538e-05};
-
-    // p = {0.438739, 0.00711602, 0.000617204};
-    // dp = {8.84913e-05, 1.7877e-06, 2.18496e-07};
-
-    // p = {0.439279, 0.00712823, 0.000618538};
-    // dp = {9.06785e-07, 3.04058e-08, 2.48774e-09};
-
-    // p = {0.439287, 0.00712842, 0.000618553};
-    // dp = {9.10707e-09, 2.77612e-10, 1.85839e-11};
-
-    // p = {0.439287, 0.00712842, 0.000618553};
-    // dp = {9.09815e-12, 2.52127e-13, 1.68779e-14};
-
+    //
+    // Our step count to keep track of steps when
+    // twiddling.
+    //
     steps = 0;
-    best_error = std::numeric_limits<double>::max();
 
+    //
+    // The index into the 'p' array (coefficients) that
+    // we are currently twiddling.
+    //
     pid_index = 0;
+
+    //
+    // the current state of the twiddle.
+    //
     pid_state = twiddle_start;
-    done = false;
+
+    //
+    // if the sum of the dp parameters is lower
+    // than the TWIDDLE_TOLERANCE then our
+    // twiddling is already done.
+    //
+    twiddle_completed = (std::accumulate(dp.begin(), dp.end(), 0.0) < TWIDDLE_TOLERANCE);
 }
 
 
-void PID::UpdateError(double cte)
+//
+// Helper function to calculate the
+// average error during a twiddle operation.
+//
+double PID::calculateAvgTwiddleError()
+{
+    int divideBy = 0;
+    double error = 0.0;
+
+    for (int i = 0; i < ctes.size(); ++i)
+    {
+        if (i >= TWIDDLE_NUMBER_STEPS)
+        {
+            divideBy++;
+            error += ctes[i];
+        }
+    }
+
+    error /= divideBy;
+    return error;
+}
+
+
+//
+// Updates the Proportional, Integral, and Differential errors.
+// Returns the reset state of the twiddle algorithm.
+//  - returns true if we need to reset to beginning of the track
+//  - returns false if we do not.
+//
+bool PID::UpdateError(double cte)
 {
     //
     // Increment the number of steps
     // so far.  We use this to know
     // if we have enough CTEs to twiddle
-    // wieh
+    // with
     //
     steps++;
 
     //
-    // The derivative portion of the error.  Before
+    // The differential portion of the error.  Before
     // we set p_error with the current CTE we can
     // use as the previous crosstrack error to
     // calculate d_error
@@ -74,94 +106,137 @@ void PID::UpdateError(double cte)
     p_error = cte;
 
     //
-    // integral - sum of cross track errors.
+    // integral - sum of cross track errors.  We use
+    // a deque so that we can maintain only the last
+    // |INTEGRAL_ERROR_COUNT| CTEs
     //
-    i_error += cte;
-
-    if (done)
+    // Push back the current CTE
+    //
+    i_errors.push_back(cte);
+    while (i_errors.size() > INTEGRAL_ERROR_COUNT)
     {
-        return;
+        //
+        // Pop any excess CTEs
+        //
+        i_errors.pop_front();
     }
 
-    if ((pid_state != twiddle_start) && (ctes.size() < TWIDDLE_OVER_STEPS))
+    //
+    // The i_error is the sum of the prevous CTEs
+    //
+    i_error = std::accumulate(i_errors.begin(), i_errors.end(), 0.0);
+
+    //
+    // if the twiddling is done we return false
+    // to indicate that the sim does not need to
+    // be reset.
+    //
+    if (twiddle_completed)
+    {
+        return false;
+    }
+
+    //
+    // If we are still capturing CTEs during a twiddle step
+    // we simply push back errors into our CTE vector and
+    // return false to keep the sim going.  We gather a count of
+    // |(2 * twiddle_steps)| CTEs before calculating the error.
+    //
+    if ((pid_state != twiddle_start) && (ctes.size() < (twiddle_steps)))
     {
         ctes.push_back(cte * cte);
-        return;
+        return false;
     }
 
     //
-    // If we have at least 100 values in our CTE
+    // Once we have 2 * twiddle_steps values in our CTE
     // history we can use them to twiddle our
-    // PID coefficitents to find the optimum values
+    // PID coefficients to find the optimum values
     //
-
-
     switch (pid_state)
     {
         case twiddle_start:
         {
-            std::cout << "Start p[" << pid_index << "] += " << dp[pid_index] << " = ";
+            //
+            // Starting a twiddle for the coefficient
+            // at pid_index:  We twiddle up by the
+            // value in the dp vector and return true
+            // to tell the sim to reset.
+            //
             p[pid_index] += dp[pid_index];
-            std::cout << p[pid_index] << "\n";
-            ctes.clear();
-            i_error = 0.0;
             pid_state = twiddled_up;
-            break;
+            return true;
         }
 
         case twiddled_up:
         {
-            double error = 0.0;
-            int divideBy = 0;
-            for (int i = 0; i < ctes.size(); ++i)
-            {
-                divideBy++;
-                error += ctes[i];
-            }
-
-            error /= divideBy;
-            std::cout << "UP: Step: " << steps << " Error: " << error << " p[" << pid_index << "] = " << p[pid_index] << "\n";
+            //
+            // We have now run the sim for |2 * twiddle_steps|
+            // and we can now calculate the error
+            //
+            double error = calculateAvgTwiddleError();
 
             if (error < best_error)
             {
+                //
+                // twiddling up was successful in
+                // obtaining a lower error value.  move
+                // the dp value up for the next time around.
+                //
                 best_error = error;
                 dp[pid_index] *= 1.1;
+
+                //
+                // Change state to done to move to the
+                // next 'p' value below.
+                //
                 pid_state = twiddle_done;
             }
             else
             {
+                //
+                // twiddling up didn't result in a lower
+                // error.  Try something lower than the dp
+                // value.
+                //
                 p[pid_index] -= 2 * dp[pid_index];
-                std::cout << "FLIP : Step: " << steps << " Error: " << error << " now p[" << pid_index << "] = " << p[pid_index] << "\n";
-                ctes.clear();
-                i_error = 0.0;
                 pid_state = twiddled_back;
+
+                //
+                // let the sim know to reset and start
+                // from the beginning.
+                //
+                return true;
             }
             break;
         }
 
         case twiddled_back:
         {
-            double error = 0.0;
-            int divideBy = 0;
-            for (int i = 0; i < ctes.size(); ++i)
-            {
-                divideBy++;
-                error += ctes[i];
-            }
-
-            error /= divideBy;
+            //
+            // We have now run the sim for |2 * twiddle_steps|
+            // after trying the lower twiddle value.
+            //
+            double error = calculateAvgTwiddleError();
 
             if (error < best_error)
             {
+                //
+                // Found a lower error.  update dp
+                // and set state to move to the next
+                // PID coefficient.
+                //
                 best_error = error;
                 dp[pid_index] *= 1.1;
                 pid_state = twiddle_done;
             }
             else
             {
+                //
+                // we didn't find a lower error. Try a
+                // lower dp value next time around.
+                //
                 p[pid_index] += dp[pid_index];
-                std::cout << "NO GO : Step: " << steps << " Error: " << error << " now p[" << pid_index << "] = " << p[pid_index] << "\n";
-                ctes.clear();
                 dp[pid_index] *= 0.9;
                 pid_state = twiddle_done;
             }
@@ -174,33 +249,48 @@ void PID::UpdateError(double cte)
 
     if (pid_state == twiddle_done)
     {
-        pid_index = (pid_index + 1) % 3;
+        //
+        // Move to the next coefficient in the vector
+        // looping around if necessary.
+        //
         pid_state = twiddle_start;
-        ctes.clear();
-        i_error = 0.0;
+        pid_index = (pid_index + 1) % 3;
 
+        //
+        // We are done twiddling when the sum of the dp
+        // values is less than the TWIDDLE_TOLERANCE.
+        //
         double sum = std::accumulate(dp.begin(), dp.end(), 0.0);
-        std::cout << "------------------- " << sum << " -------------------------------\n";
         if (sum < TWIDDLE_TOLERANCE)
         {
-            std::cout << "--------------------------------------------------\n";
-            std::cout << "--------------------------------------------------\n";
-            std::cout << "p  = {" << p[0] << ", " << p[1] << ", " << p[2] << "};\n";
-            std::cout << "dp = {" << dp[0] << ", " << dp[1] << ", " << dp[2] << "};\n";
-            std::cout << "--------------------------------------------------\n";
-            std::cout << "--------------------------------------------------\n";
-            done = true;
+            twiddle_completed = true;
         }
+
+        //
+        // Since we are starting a new index in the
+        // p array, we tell the sim to reset to the beginning.
+        //
+        return true;
     }
+
+    return false;
 }
 
 
+//
+// This method is called by main.cpp to find
+// the new steering value.
+//
 double PID::TotalError()
 {
     //
     // Calculate and return the total error
     //
     double error = (-p[0] * p_error) + (-p[1] * d_error) + (-p[2] * i_error);
+
+    //
+    // clamp to [-1, 1]
+    //
     if (error < -1.0)
     {
         error = -1.0;
@@ -212,12 +302,31 @@ double PID::TotalError()
     }
 
     return error;
-
 }
 
+
+//
+// Reset some values when the simulator resets.
+// main.cpp calls this function when it
+// sends the 'reset' message to the sim.
+//
+void PID::Reset()
+{
+    steps   = 0;
+    i_error = 0.0;
+    ctes.clear();
+}
+
+
+//
+// This method lets main.cpp know what speed to
+// message to the sim.  Currently this just returns
+// .3 but could be where another PID contoller handles
+// the speed values.
+//
 double PID::getSpeed()
 {
-    return 0.05;
+    return 0.3;
 }
 
 
