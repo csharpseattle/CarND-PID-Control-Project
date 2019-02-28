@@ -3,12 +3,13 @@
 #include <iostream>
 #include <iomanip>
 #include <cmath>
+
 PID::PID()  {}
 PID::~PID() {}
 
 const int TWIDDLE_NUMBER_STEPS = 250;
 const double TWIDDLE_TOLERANCE = 0.00001;
-const int INTEGRAL_ERROR_COUNT = 200;
+const int INTEGRAL_ERROR_COUNT = 1000;
 
 void PID::Init(double Kp_, double Kd_, double Ki_)
 {
@@ -77,7 +78,7 @@ double PID::calculateAvgTwiddleError()
 
 
 //
-// Updates the Proportional, Integral, and Differential errors.
+// Updates the Proportional, Integral, and Derivative errors.
 // Returns the reset state of the twiddle algorithm.
 //  - returns true if we need to reset to beginning of the track
 //  - returns false if we do not.
